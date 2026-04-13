@@ -1,8 +1,10 @@
 import os
 import json
+import uuid
 import asyncio
 import logging
 from telethon import TelegramClient, events
+from telethon.tl.types import Channel
 from openai import OpenAI
 from supabase import create_client
 
@@ -17,10 +19,14 @@ OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 CHANNELS = [ch.strip() for ch in os.environ["CHANNELS"].split(",") if ch.strip()]
+BACKFILL_COUNT = int(os.environ.get("BACKFILL_COUNT", "10"))
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 tg_client = TelegramClient("session", API_ID, API_HASH)
+
+# Track processed post URLs to avoid duplicates
+processed_urls: set[str] = set()
 
 GPT_PARSE_PROMPT = """Ты парсер объявлений о животных. Из текста ниже извлеки данные и верни ТОЛЬКО валидный JSON без пояснений.
 
@@ -33,12 +39,13 @@ GPT_PARSE_PROMPT = """Ты парсер объявлений о животных
 - name: кличка или null
 - district: район города или null
 - features: особые приметы или null
-- description: краткое описание ситуации
+- description: краткое описание ситуации (2-3 предложения)
 - contact: телефон или мессенджер или null
 - lat: широта (если есть геолокация) или null
 - lng: долгота (если есть геолокация) или null
 
 Если поле не упомянуто — верни null.
+Если текст НЕ является объявлением о животном (реклама, новости, опрос) — верни {"skip": true}.
 Текст: {post_text}"""
 
 
@@ -77,9 +84,56 @@ async def upload_photo(photo_bytes: bytes, listing_id: str, filename: str) -> st
         return None
 
 
-async def save_listing(data: dict, photo_url: str | None, channel: str, post_url: str) -> None:
-    """Insert parsed listing into Supabase."""
+def is_duplicate(post_url: str) -> bool:
+    """Check if post was already saved to DB."""
+    if post_url in processed_urls:
+        return True
+    try:
+        result = supabase.table("listings").select("id").eq("telegram_post_url", post_url).execute()
+        if result.data:
+            processed_urls.add(post_url)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+async def process_message(message, channel_username: str) -> None:
+    """Process a single message: parse with GPT, upload photo, save to DB."""
+    text = message.raw_text
+    if not text or len(text) < 20:
+        return
+
+    post_url = f"https://t.me/{channel_username}/{message.id}"
+
+    # Skip duplicates
+    if is_duplicate(post_url):
+        logger.debug("Skipping duplicate: %s", post_url)
+        return
+
+    logger.info("Processing post from %s: %s...", channel_username, text[:80])
+
+    # Parse with GPT
+    data = await parse_with_gpt(text)
+    if not data or data.get("skip") or "type" not in data:
+        logger.info("Skipped (not a listing or parse failed)")
+        return
+
+    listing_id = str(uuid.uuid4())
+
+    # Download & upload photo
+    photo_url = None
+    if message.photo:
+        try:
+            photo_bytes = await tg_client.download_media(message, bytes)
+            if photo_bytes:
+                photo_url = await upload_photo(photo_bytes, listing_id, "photo.jpg")
+        except Exception as e:
+            logger.error("Photo download error: %s", e)
+
+    # Save to DB
     row = {
+        "id": listing_id,
         "type": data.get("type", "found"),
         "animal": data.get("animal", "другое"),
         "breed": data.get("breed"),
@@ -94,7 +148,7 @@ async def save_listing(data: dict, photo_url: str | None, channel: str, post_url
         "photo_url": photo_url,
         "source": "telegram",
         "telegram_post_url": post_url,
-        "telegram_channel": channel,
+        "telegram_channel": channel_username,
         "lat": data.get("lat"),
         "lng": data.get("lng"),
         "moderation_status": "approved",
@@ -102,52 +156,61 @@ async def save_listing(data: dict, photo_url: str | None, channel: str, post_url
     }
     try:
         supabase.table("listings").insert(row).execute()
-        logger.info("Saved listing from %s", channel)
+        processed_urls.add(post_url)
+        logger.info("SAVED listing: %s [%s] from %s", data.get("animal"), data.get("type"), channel_username)
     except Exception as e:
         logger.error("DB insert error: %s", e)
 
 
-@tg_client.on(events.NewMessage(chats=CHANNELS))
-async def handler(event):
-    """Handle new messages from watched channels."""
-    text = event.raw_text
-    if not text or len(text) < 20:
-        return
+async def backfill_channels():
+    """Fetch and process the last N messages from each channel."""
+    logger.info("=== BACKFILL: fetching last %d posts from %d channels ===", BACKFILL_COUNT, len(CHANNELS))
 
-    logger.info("New post from %s: %s...", event.chat.username or event.chat_id, text[:80])
-
-    # Parse with GPT
-    data = await parse_with_gpt(text)
-    if not data or "type" not in data:
-        logger.warning("Could not parse post, skipping")
-        return
-
-    # Generate listing ID for photo path
-    import uuid
-    listing_id = str(uuid.uuid4())
-
-    # Download & upload photo
-    photo_url = None
-    if event.message.photo:
+    resolved = []
+    for ch_name in CHANNELS:
         try:
-            photo_bytes = await tg_client.download_media(event.message, bytes)
-            if photo_bytes:
-                photo_url = await upload_photo(photo_bytes, listing_id, "photo.jpg")
+            entity = await tg_client.get_entity(ch_name)
+            resolved.append((ch_name, entity))
+            logger.info("Resolved channel: %s → %s (id=%s)", ch_name, getattr(entity, 'title', '?'), entity.id)
         except Exception as e:
-            logger.error("Photo download error: %s", e)
+            logger.error("Could not resolve channel '%s': %s", ch_name, e)
 
-    # Build post URL
-    channel_username = event.chat.username or str(event.chat_id)
-    post_url = f"https://t.me/{channel_username}/{event.message.id}"
+    total_saved = 0
+    for ch_name, entity in resolved:
+        try:
+            username = getattr(entity, 'username', None) or ch_name
+            count = 0
+            async for message in tg_client.iter_messages(entity, limit=BACKFILL_COUNT):
+                if message.raw_text and len(message.raw_text) >= 20:
+                    await process_message(message, username)
+                    count += 1
+                    await asyncio.sleep(0.5)  # rate limit GPT calls
+            logger.info("Backfilled %d posts from %s", count, ch_name)
+            total_saved += count
+        except Exception as e:
+            logger.error("Backfill error for %s: %s", ch_name, e)
 
-    # Save to DB
-    await save_listing(data, photo_url, channel_username, post_url)
+    logger.info("=== BACKFILL COMPLETE: processed %d posts ===", total_saved)
+    return resolved
 
 
 async def main():
     logger.info("Starting parser, watching %d channels: %s", len(CHANNELS), CHANNELS)
     await tg_client.start(phone=PHONE)
     logger.info("Telegram client connected")
+
+    # Step 1: Backfill recent posts
+    resolved = await backfill_channels()
+
+    # Step 2: Register event handler for new messages using resolved entities
+    entity_ids = [entity.id for _, entity in resolved]
+
+    @tg_client.on(events.NewMessage(chats=entity_ids))
+    async def handler(event):
+        channel_username = event.chat.username or str(event.chat_id)
+        await process_message(event.message, channel_username)
+
+    logger.info("Live listener active for %d channels, waiting for new posts...", len(entity_ids))
     await tg_client.run_until_disconnected()
 
 
