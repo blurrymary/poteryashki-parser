@@ -1,4 +1,5 @@
 .env
-*.session
 __pycache__/
 *.pyc
+venv/
+auth.py
