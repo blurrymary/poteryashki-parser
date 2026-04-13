@@ -31,11 +31,12 @@ processed_urls: set[str] = set()
 GPT_PARSE_PROMPT = """Ты парсер объявлений о животных. Из текста ниже извлеки данные и верни ТОЛЬКО валидный JSON без пояснений.
 
 Поля:
-- type: "lost" | "found" | "give_away" (определи по смыслу)
+- type: "lost" | "found" | "give_away" | "help" (определи по смыслу; help = нужна помощь, донор крови, сбор средств на лечение)
 - animal: "кошка" | "собака" | "другое"
 - breed: порода или null
 - color: цвет/окрас или null
 - age: возраст животного — выбери из вариантов: "до 6 месяцев" | "6–12 месяцев" | "1–3 года" | "3–5 лет" | "5–10 лет" | "старше 10 лет" | null
+- sex: пол животного — "мальчик" | "девочка" | null
 - name: кличка или null
 - district: район города или null
 - features: особые приметы или null
@@ -147,6 +148,7 @@ async def process_message(message, channel_username: str) -> None:
         "breed": data.get("breed"),
         "color": data.get("color"),
         "age": data.get("age"),
+        "sex": data.get("sex"),
         "name": data.get("name"),
         "city": "Минск",
         "district": data.get("district"),
