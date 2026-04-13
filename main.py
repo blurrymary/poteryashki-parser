@@ -37,6 +37,7 @@ GPT_PARSE_PROMPT = """Ты парсер объявлений о животных
 - color: цвет/окрас или null
 - age: возраст животного — выбери из вариантов: "до 6 месяцев" | "6–12 месяцев" | "1–3 года" | "3–5 лет" | "5–10 лет" | "старше 10 лет" | null
 - sex: пол животного — "мальчик" | "девочка" | null
+- event_date: когда произошло событие (дата и время пропажи/находки) — строка как в тексте, например "10 апреля, около 18:00" или null
 - name: кличка или null
 - district: район города или null
 - features: особые приметы или null
@@ -149,6 +150,7 @@ async def process_message(message, channel_username: str) -> None:
         "color": data.get("color"),
         "age": data.get("age"),
         "sex": data.get("sex"),
+        "event_date": data.get("event_date"),
         "name": data.get("name"),
         "city": "Минск",
         "district": data.get("district"),
