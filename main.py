@@ -45,7 +45,7 @@ GPT_PARSE_PROMPT = """Ты парсер объявлений о животных
 - lng: долгота (если есть геолокация) или null
 
 Если поле не упомянуто — верни null.
-Если текст НЕ является объявлением о животном (реклама, новости, опрос) — верни {"skip": true}.
+Если текст НЕ является объявлением о животном (реклама, новости, опрос, обсуждение) — верни JSON с полем "type": "skip".
 Текст: {post_text}"""
 
 
@@ -55,14 +55,22 @@ async def parse_with_gpt(text: str) -> dict | None:
         response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "Ты извлекаешь структурированные данные из объявлений о животных. Отвечай ТОЛЬКО валидным JSON."},
+                {"role": "system", "content": "Ты извлекаешь структурированные данные из объявлений о животных. Отвечай ТОЛЬКО валидным JSON объектом."},
                 {"role": "user", "content": GPT_PARSE_PROMPT.format(post_text=text)},
             ],
             temperature=0,
             response_format={"type": "json_object"},
         )
         raw = response.choices[0].message.content
-        return json.loads(raw)
+        if not raw:
+            return None
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return None
+        return data
+    except json.JSONDecodeError as e:
+        logger.error("GPT JSON decode error: %s (raw: %s)", e, raw[:200] if raw else "empty")
+        return None
     except Exception as e:
         logger.error("GPT parse error: %s", e)
         return None
@@ -115,7 +123,7 @@ async def process_message(message, channel_username: str) -> None:
 
     # Parse with GPT
     data = await parse_with_gpt(text)
-    if not data or data.get("skip") or "type" not in data:
+    if not data or data.get("type") in (None, "skip"):
         logger.info("Skipped (not a listing or parse failed)")
         return
 
