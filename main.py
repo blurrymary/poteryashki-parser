@@ -29,6 +29,7 @@ GPT_PARSE_PROMPT = """Ты парсер объявлений о животных
 - animal: "кошка" | "собака" | "другое"
 - breed: порода или null
 - color: цвет/окрас или null
+- age: возраст животного — выбери из вариантов: "до 6 месяцев" | "6–12 месяцев" | "1–3 года" | "3–5 лет" | "5–10 лет" | "старше 10 лет" | null
 - name: кличка или null
 - district: район города или null
 - features: особые приметы или null
@@ -83,6 +84,7 @@ async def save_listing(data: dict, photo_url: str | None, channel: str, post_url
         "animal": data.get("animal", "другое"),
         "breed": data.get("breed"),
         "color": data.get("color"),
+        "age": data.get("age"),
         "name": data.get("name"),
         "city": "Минск",
         "district": data.get("district"),
