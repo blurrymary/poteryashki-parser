@@ -4,6 +4,7 @@ import uuid
 import asyncio
 import logging
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 from telethon.tl.types import Channel
 from openai import OpenAI
 from supabase import create_client
@@ -20,10 +21,16 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 CHANNELS = [ch.strip() for ch in os.environ["CHANNELS"].split(",") if ch.strip()]
 BACKFILL_COUNT = int(os.environ.get("BACKFILL_COUNT", "10"))
+STRING_SESSION = os.environ.get("TELEGRAM_STRING_SESSION", "")
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-tg_client = TelegramClient("session", API_ID, API_HASH)
+
+# Use StringSession (survives container restarts, no file needed)
+if STRING_SESSION:
+    tg_client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
+else:
+    tg_client = TelegramClient("session", API_ID, API_HASH)
 
 # Track processed post URLs to avoid duplicates
 processed_urls: set[str] = set()
